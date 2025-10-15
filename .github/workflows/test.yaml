@@ -1,0 +1,16 @@
+name : poc_github_action
+on:
+    push:
+      branches: 
+        - 'SREE-*'
+
+jobs:
+  Explore-GitHub-Actions:
+    #log_message: 
+    runs-on: ubuntu-latest
+    steps:
+        - run: echo "The job was automatically triggered by a PR event."
+        - run: echo "Hello World!"
+
+
+    

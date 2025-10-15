@@ -1,0 +1,102 @@
+# Merge changes pushed to the major release candidate to main branch
+name: merge rc to main
+
+on:
+  workflow_dispatch:
+  # this is UTC
+  schedule:
+    - cron: '0  9 * * *'
+    - cron: '0 13 * * *'
+    - cron: '0 17 * * *'
+
+permissions:
+  contents: 'write'
+  id-token: 'write'
+  pull-requests: 'write'
+
+jobs:
+  rc-upmerge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the prod branch    # we need to check out any branch to have a git workspace
+        uses: actions/checkout@v4
+        with:
+          ref: prod
+      - name: Set up git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "noreply@github.com"
+          git config --global push.autoSetupRemote true
+      - name: Get the latest major rc branch
+        run: |
+          git fetch --unshallow origin
+          latest_major_rc=$(git branch --format '%(refname:short)' -r --list 'origin/rc_*' --sort=-committerdate | grep -Ex 'origin/rc_[0-9]+' | head -n1)
+          echo "latest_major_rc=${latest_major_rc#origin/}" >> $GITHUB_ENV
+
+      - name: Check the diff
+        if: ${{ env.latest_major_rc != '' }}    # it can be empty never or only for the very first time
+        run: |
+          echo "source_branch=${{ env.latest_major_rc }}" >> $GITHUB_ENV
+          echo "target_branch=main" >> $GITHUB_ENV
+          git checkout ${{ env.latest_major_rc }}
+          if ! git diff --merge-base --quiet origin/main; then
+           echo "to_be_merged=true" >> $GITHUB_ENV
+          fi
+
+      - name: Get commit date of the source branch
+        run: echo "source_date=$(git log -1 --format=%cd --date=format:%Y-%m-%d_%H-%M-%S)" >> $GITHUB_ENV
+      - name: Get SHA of the source branch
+        run: echo "source_sha=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Create merge branch
+        if: ${{ env.to_be_merged == 'true' }}
+        run: |
+          merge_branch=resolve_${{ env.source_branch }}_to_${{ env.target_branch }}_at_${{ env.source_date }}_from_${{ env.source_sha }}
+          if git ls-remote --quiet --exit-code --heads origin ${merge_branch}; then
+            echo "to_be_merged=false" >> $GITHUB_ENV      # the resolve branch already exists. no need to try to create again, but just update the branch if possible
+            git checkout ${merge_branch}
+            if ! gh pr update-branch; then
+              echo "The resolve branch cannot be updated"
+            fi
+          else
+            git checkout -b ${merge_branch}
+          fi
+          echo "merge_branch=${merge_branch}" >> $GITHUB_ENV
+      - name: Merge the target branch into the merge branch
+        if: ${{ env.to_be_merged == 'true' }}
+        run: |
+          git merge origin/${target_branch} --no-commit --no-ff || true
+          if git ls-files -u | grep -q .; then
+            echo "Merge conflicts detected! Aborting merge."
+            git merge --abort  # Abort the merge if conflicts are found
+          else
+            git commit -m "Merge ${{ env.target_branch }} into ${{ env.merge_branch }}" || true
+          fi
+          git push
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Create PR
+        if: ${{ env.to_be_merged == 'true' }}
+        run: |
+          pr_url=$(gh pr create --title "Resolve ${{ env.source_branch }} to ${{ env.target_branch }} at ${{ env.source_date }} from ${{ env.source_sha }}" \
+          --body "Up-merge" \
+          --head "${{ env.merge_branch }}" \
+          --base "${{ env.target_branch }}")
+          echo "pr_url=${pr_url}" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ github.token }}
+        continue-on-error: true     #if there are conflicts at pr creation or updating, the result will be an error even if the pr is created successfully. I don't want these cases to fail the whole workflow.
+      - name: Auto approve
+        if: ${{ env.to_be_merged == 'true' && env.pr_url != '' }}
+        run: |
+          gh pr review --approve "${{ env.pr_url }}"
+        env:
+          GITHUB_TOKEN: ${{secrets.BOT_TOKEN}}
+        continue-on-error: true
+      - name: Auto merge
+        if: ${{ env.to_be_merged == 'true' && env.pr_url != '' }}
+        run: |
+          gh pr merge --auto --merge "${{ env.pr_url }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true

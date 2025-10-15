@@ -1,0 +1,86 @@
+# Merge the released version to prod or the active major release candidate branch
+name: merge release to prod or active major rc
+
+on:
+  push:
+    branches:
+      - 'release-*'
+
+permissions:
+  contents: 'write'
+  id-token: 'write'
+  pull-requests: 'write'
+
+jobs:
+  release-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Set up git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "noreply@github.com"
+          git config --global push.autoSetupRemote true
+      - name: Get the target branch
+        run: |
+          git fetch origin
+          git fetch --tags --unshallow origin
+          latest_tag=$(git for-each-ref --sort=-taggerdate --format '%(refname:short)' refs/tags | head -n 1)
+          major_version=${latest_tag%%.*}
+          if ! git ls-remote origin "rc_${major_version}" | grep "rc_${major_version}"; then
+            target_branch=prod         # the major rc branch does not exist
+          elif git merge-base --is-ancestor "origin/rc_${major_version}" "origin/prod"; then
+            target_branch=prod         # the major version of the released tag is merged into the prod branch
+          else
+            target_branch=rc_${major_version}
+          fi
+          echo "target_branch=${target_branch}" >> $GITHUB_ENV
+      - name: Merge the target branch into the merge branch
+        run: |
+          git merge "origin/${{ env.target_branch }}" --no-commit --no-ff || true
+          if git ls-files -u | grep -q .; then
+            echo "Merge conflicts detected! Aborting merge."
+            git merge --abort  # Abort the merge if conflicts are found
+          else
+            git commit -m "Merge ${{ env.target_branch }} into ${{ github.ref_name }}" || true
+          fi
+          git push
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Create PR and update the merge branch
+        run: |
+          pr_url=$(gh pr create --title "Merge ${{ github.ref_name }} to ${{ env.target_branch }}" \
+          --body "Merge release to ${{ env.target_branch }}" \
+          --head "${{ github.ref_name }}" \
+          --base "${{ env.target_branch }}")
+          echo "pr_url=${pr_url}" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ github.token }}
+        continue-on-error: true     #if there are conflicts at pr creation, the result will be an error even if the pr is created successfully. I don't want these cases to fail the whole workflow.
+      - name: Check the version in pom.xml
+        run: |
+          version=$(grep "<version>" aodocs-parent/pom.xml | head -n 1 | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
+          echo "version=${version}" >> $GITHUB_ENV
+      - name: Add a comment to the PR
+        if: ${{ env.pr_url != '' && !contains(env.version, 'SNAPSHOT') }}
+        run: |
+          gh pr comment "${{ env.pr_url }}" --body "The version number in pom.xml is not a SNAPSHOT version. Please check the version number."
+        env:
+          GITHUB_TOKEN: ${{secrets.BOT_TOKEN}}
+      - name: Approve the PR
+        if: ${{ env.pr_url != '' && contains(env.version, 'SNAPSHOT') }}
+        run: |
+          gh pr review --approve "${{ env.pr_url }}"
+        env:
+          GITHUB_TOKEN: ${{secrets.BOT_TOKEN}}
+        continue-on-error: true
+      - name: Auto merge
+        if: ${{ env.pr_url != '' && contains(env.version, 'SNAPSHOT') }}
+        run: |
+          gh pr merge --auto --merge "${{ env.pr_url }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true

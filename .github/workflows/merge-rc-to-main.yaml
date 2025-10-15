@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
   # this is UTC
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/1 * * * *'
 
 permissions:
   contents: 'write'
